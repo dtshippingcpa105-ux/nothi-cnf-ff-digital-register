@@ -541,6 +541,14 @@
             <input type="text" id="doc-shortdetails" placeholder="যেমন: ট্রেড লাইসেন্স নবায়ন কপি, পে-অর্ডার">
           </div>
           <div class="field">
+            <label>ডকুমেন্টের প্রথম পৃষ্ঠার ছবি (ঐচ্ছিক)</label>
+            <input type="file" id="doc-photo" accept="image/*" capture="environment">
+            <div id="doc-photo-preview" style="margin-top:8px;display:none;">
+              <img id="doc-photo-thumb" style="max-width:130px;max-height:130px;border-radius:8px;border:1px solid var(--glass-border);display:block;object-fit:cover;">
+              <button type="button" class="btn secondary" id="doc-photo-remove" style="margin-top:6px;">✕ ছবি বাতিল করুন</button>
+            </div>
+          </div>
+          <div class="field">
             <label>মন্তব্য</label>
             <input type="text" id="doc-remarks" placeholder="ঐচ্ছিক">
           </div>
@@ -1462,6 +1470,56 @@ document.getElementById('doc-shortflag').addEventListener('change', (e)=>{
   document.getElementById('doc-shortdetails-field').style.display = e.target.value==='yes' ? 'block':'none';
 });
 
+function compressImageFile(file, maxDim, quality){
+  return new Promise((resolve, reject)=>{
+    const reader = new FileReader();
+    reader.onload = ()=>{
+      const img = new Image();
+      img.onload = ()=>{
+        let w = img.width, h = img.height;
+        if(w > maxDim || h > maxDim){
+          if(w >= h){ h = Math.round(h*maxDim/w); w = maxDim; }
+          else { w = Math.round(w*maxDim/h); h = maxDim; }
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL('image/jpeg', quality));
+      };
+      img.onerror = reject;
+      img.src = reader.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+let docPhotoDataUri = null;
+document.getElementById('doc-photo').addEventListener('change', async (e)=>{
+  const file = e.target.files && e.target.files[0];
+  const previewWrap = document.getElementById('doc-photo-preview');
+  if(!file){ docPhotoDataUri = null; previewWrap.style.display='none'; return; }
+  if(!file.type.startsWith('image/')){
+    alert('শুধু ছবি ফাইল বাছাই করুন।');
+    e.target.value=''; docPhotoDataUri = null; previewWrap.style.display='none';
+    return;
+  }
+  try{
+    docPhotoDataUri = await compressImageFile(file, 1600, 0.72);
+    document.getElementById('doc-photo-thumb').src = docPhotoDataUri;
+    previewWrap.style.display='block';
+  }catch(err){
+    alert('ছবি প্রসেস করতে সমস্যা হয়েছে। আবার চেষ্টা করুন।');
+    docPhotoDataUri = null; previewWrap.style.display='none';
+  }
+});
+document.getElementById('doc-photo-remove').addEventListener('click', ()=>{
+  docPhotoDataUri = null;
+  document.getElementById('doc-photo').value='';
+  document.getElementById('doc-photo-preview').style.display='none';
+});
+
 function docFiltered(){
   const q = (document.getElementById('doc-search').value||'').trim().toLowerCase();
   const ftype = document.getElementById('doc-filter-type').value;
@@ -1498,6 +1556,7 @@ function renderDocs(){
         </div>
         <div>${shortPill}</div>
       </div>
+      ${d.hasPhoto ? `<button class="btn secondary" style="margin-top:8px;" onclick="window.__viewDocPhoto('${d.id}')">🖼 ডকুমেন্টের ছবি দেখুন</button>` : ''}
     </div>`;
   }).join('');
 }
@@ -1525,8 +1584,14 @@ document.getElementById('doc-add-btn').addEventListener('click', async ()=>{
     shortFlag,
     shortDetails: shortFlag==='yes' ? document.getElementById('doc-shortdetails').value.trim() : '',
     remarks: document.getElementById('doc-remarks').value.trim(),
+    hasPhoto: false,
     createdAt: Date.now()
   };
+  if(docPhotoDataUri){
+    const photoOk = await saveJSON('despatch_photos/'+entry.id, docPhotoDataUri);
+    if(photoOk){ entry.hasPhoto = true; }
+    else{ alert('ছবি সংরক্ষণ করা যায়নি (হয়তো নেটওয়ার্ক সমস্যা), তবে বাকি তথ্য যুক্ত হচ্ছে।'); }
+  }
   docSubmissions.push(entry);
   await saveJSON(StoreKeys.docSubmissions, docSubmissions);
   ['doc-despatch-no','doc-org','doc-mobile','doc-purpose-other','doc-shortdetails','doc-remarks'].forEach(id=>document.getElementById(id).value='');
@@ -1535,6 +1600,9 @@ document.getElementById('doc-add-btn').addEventListener('click', async ()=>{
   document.getElementById('doc-purpose-other').style.display='none';
   document.getElementById('doc-shortdetails-field').style.display='none';
   document.getElementById('doc-date').value = todayISO();
+  docPhotoDataUri = null;
+  document.getElementById('doc-photo').value='';
+  document.getElementById('doc-photo-preview').style.display='none';
   renderDocs();
   renderDashboard();
 });
@@ -1792,6 +1860,12 @@ async function getFormatFile(id){
     return snap.val();
   }catch(e){ console.error('firebase getFormatFile failed', id, e); return null; }
 }
+async function getDespatchPhoto(id){
+  try{
+    const snap = await fbDb.ref('despatch_photos/'+id).once('value');
+    return snap.val();
+  }catch(e){ console.error('firebase getDespatchPhoto failed', id, e); return null; }
+}
 function fmtBytes(n){
   if(!n) return '';
   if(n<1024) return n+' B';
@@ -1929,6 +2003,23 @@ window.__deleteFormat = async function(id){
   await saveJSON(StoreKeys.formats, appFormats);
   await deleteStorageKey('format_files/'+id);
   renderFormats();
+};
+
+window.__viewDocPhoto = async function(id){
+  const winRef = window.open('', '_blank');
+  const dataUri = await getDespatchPhoto(id);
+  if(!dataUri){ if(winRef) winRef.close(); alert('ছবিটি খুলতে সমস্যা হয়েছে।'); return; }
+  try{
+    const parts = dataUri.split(',');
+    const mimeMatch = parts[0].match(/data:(.*?);base64/);
+    const mime = mimeMatch ? mimeMatch[1] : 'image/jpeg';
+    const byteChars = atob(parts[1]);
+    const byteNumbers = new Array(byteChars.length);
+    for(let i=0;i<byteChars.length;i++){ byteNumbers[i] = byteChars.charCodeAt(i); }
+    const blob = new Blob([new Uint8Array(byteNumbers)], {type: mime});
+    const url = URL.createObjectURL(blob);
+    if(winRef){ winRef.location.href = url; } else { window.open(url, '_blank'); }
+  }catch(e){ if(winRef) winRef.close(); alert('ছবিটি খুলতে সমস্যা হয়েছে।'); }
 };
 
 init();
